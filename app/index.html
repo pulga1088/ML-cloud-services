@@ -9,10 +9,21 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 520p
 h1 { font-size: 24px; }
 label { display: block; margin-top: 14px; font-size: 14px; color: #b8bcc6; }
 input, select { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #333844; background: #181b22; color: #e8e8ea; font-size: 16px; box-sizing: border-box; }
-button { margin-top: 20px; width: 100%; padding: 12px; border: 0; border-radius: 8px; background: #ff9d00; color: #111; font-size: 16px; font-weight: 600; cursor: pointer; }
-button:disabled { opacity: 0.5; cursor: wait; }
-#result { margin-top: 20px; padding: 14px; border-radius: 8px; background: #181b22; font-size: 18px; min-height: 24px; }
+button { cursor: pointer; font-family: inherit; }
+#go { margin-top: 20px; width: 100%; padding: 12px; border: 0; border-radius: 8px; background: #ff9d00; color: #111; font-size: 16px; font-weight: 600; }
+#go:disabled { opacity: 0.5; cursor: wait; }
+.examples { margin-top: 18px; font-size: 13px; color: #8b90a0; }
+.examples button { margin: 6px 6px 0 0; padding: 6px 10px; border-radius: 6px; border: 1px solid #333844; background: #181b22; color: #e8e8ea; font-size: 13px; }
+#result { margin-top: 20px; padding: 14px; border-radius: 8px; background: #181b22; min-height: 24px; }
+.pred { font-size: 20px; font-weight: 600; }
+.conf { margin-top: 6px; font-size: 16px; color: #ffb84d; }
+.row { display: flex; align-items: center; margin-top: 8px; font-size: 13px; }
+.row .name { width: 60px; }
+.row .bar { flex: 1; height: 10px; background: #2a2e38; border-radius: 5px; overflow: hidden; margin: 0 10px; }
+.row .fill { height: 100%; background: #ff9d00; }
+.row .pct { width: 52px; text-align: right; }
 #status { margin-top: 12px; font-size: 13px; color: #8b90a0; }
+.tip { margin-top: 10px; font-size: 12px; color: #8b90a0; }
 </style>
 </head>
 <body>
@@ -35,12 +46,19 @@ button:disabled { opacity: 0.5; cursor: wait; }
 </label>
 
 <button id="go" disabled>Loading Python...</button>
+
+<div class="examples">Try an example:
+<div id="ex"></div>
+</div>
+
 <div id="result"></div>
+<div class="tip">Tip: in this dataset, Na_to_K of 15 or more always means DrugY. Lower it below 15 to see the other drugs.</div>
 <div id="status">Starting Python in your browser. The first load takes about a minute.</div>
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.3/full/pyodide.js"></script>
 <script>
 const PY_CODE = `
+import json
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
@@ -79,20 +97,75 @@ try:
 
     path = "drug_pipeline.skops"
     pipe = sio.load(path, trusted=sio.get_untrusted_types(file=path))
-    pipe.predict([[30, "M", "HIGH", "NORMAL", 20.0]])
+    pipe.predict_proba([[30, "M", "HIGH", "NORMAL", 20.0]])
     source = "model trained by the pipeline (drug_pipeline.skops)"
 except Exception:
     pipe = train_from_csv()
 
 
 def predict(age, sex, bp, chol, na):
-    return str(pipe.predict([[float(age), sex, bp, chol, float(na)]])[0])
+    row = [[float(age), sex, bp, chol, float(na)]]
+    probs = pipe.predict_proba(row)[0]
+    classes = [str(c) for c in pipe.classes_]
+    best = max(range(len(classes)), key=lambda i: probs[i])
+    return json.dumps(
+        {
+            "label": classes[best],
+            "confidence": float(probs[best]),
+            "probs": {classes[i]: float(probs[i]) for i in range(len(classes))},
+        }
+    )
 `;
 
 const go = document.getElementById("go");
 const result = document.getElementById("result");
 const statusEl = document.getElementById("status");
 let predictFn = null;
+
+const EXAMPLES = [
+  ["DrugY", 30, "M", "HIGH", "NORMAL", 20],
+  ["drugA", 30, "M", "HIGH", "HIGH", 10],
+  ["drugB", 60, "F", "HIGH", "NORMAL", 10],
+  ["drugC", 40, "M", "LOW", "HIGH", 10],
+  ["drugX", 40, "F", "NORMAL", "NORMAL", 10]
+];
+
+function fill(e) {
+  document.getElementById("age").value = e[1];
+  document.getElementById("sex").value = e[2];
+  document.getElementById("bp").value = e[3];
+  document.getElementById("chol").value = e[4];
+  document.getElementById("na").value = e[5];
+  if (predictFn) { run(); }
+}
+
+const exBox = document.getElementById("ex");
+EXAMPLES.forEach((e) => {
+  const b = document.createElement("button");
+  b.textContent = e[0];
+  b.addEventListener("click", () => fill(e));
+  exBox.appendChild(b);
+});
+
+function run() {
+  const raw = predictFn(
+    document.getElementById("age").value,
+    document.getElementById("sex").value,
+    document.getElementById("bp").value,
+    document.getElementById("chol").value,
+    document.getElementById("na").value
+  );
+  const r = JSON.parse(raw);
+  const pct = (r.confidence * 100).toFixed(1);
+  let html = '<div class="pred">Predicted Drug: ' + r.label + "</div>";
+  html += '<div class="conf">Model confidence: ' + pct + "%</div>";
+  const names = Object.keys(r.probs).sort((a, b) => r.probs[b] - r.probs[a]);
+  names.forEach((n) => {
+    const p = (r.probs[n] * 100).toFixed(1);
+    html += '<div class="row"><span class="name">' + n + '</span><span class="bar"><span class="fill" style="display:block;width:' + p + '%"></span></span><span class="pct">' + p + "%</span></div>";
+  });
+  result.innerHTML = html;
+}
 
 async function init() {
   try {
@@ -120,17 +193,7 @@ async function init() {
   }
 }
 
-go.addEventListener("click", () => {
-  const out = predictFn(
-    document.getElementById("age").value,
-    document.getElementById("sex").value,
-    document.getElementById("bp").value,
-    document.getElementById("chol").value,
-    document.getElementById("na").value
-  );
-  result.textContent = "Predicted Drug: " + out;
-});
-
+go.addEventListener("click", run);
 init();
 </script>
 </body>
